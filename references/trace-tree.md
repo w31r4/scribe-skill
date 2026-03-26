@@ -66,15 +66,18 @@ parentheses in `--table` output.
 - `main_primary` — the main user-facing conversation
 
 **Subagent:**
-- `task_subagent` — general-purpose subagent
-- `task_subagent_explore` — Explore agent (file search, codebase navigation)
+- `task_subagent` — general-purpose subagent (legacy name)
+- `task_subagent_general` — general-purpose subagent (current, all tools)
+- `task_subagent_explore` — Explore agent (file search, READ-ONLY)
 - `task_subagent_plan` — Plan agent (architecture, implementation planning)
+- `task_subagent_guide` — Guide agent (documentation lookup)
 
 **Assistive:**
 - `hook_assistive` — pre/post-tool hook check (e.g., "is this safe to execute?")
 - `topic_assistive` — topic change detection
 - `suggest_assistive` — next-action suggestions
 - `filepath_assistive` — file path extraction from commands
+- `websearch_assistive` — web search helper
 - `unknown_assistive` — haiku model with 0 tools (unclassified helper)
 
 **Probe:**
@@ -134,6 +137,24 @@ response is the parent of the next round's request.
 }
 ```
 
+## Filtering by role
+
+Use `--role` and `--fine-role` to narrow the tree to specific request types:
+
+```bash
+# Only subagent requests (preserves parent hierarchy for context)
+scribe q tree --latest --source claude-code --role subagent --table
+
+# Only explore agents
+scribe q tree --latest --source claude-code --fine-role task_subagent_explore --table
+
+# Only hook assistive requests
+scribe q tree --latest --fine-role hook_assistive --table
+```
+
+The filter preserves parent nodes when their children match, so you still see
+the hierarchy context. Turns with no matching requests are omitted entirely.
+
 ## Common queries with jq
 
 ```bash
@@ -141,7 +162,7 @@ response is the parent of the next round's request.
 scribe q tree --latest --source claude-code \
   --jq '.turns[] | {turn: .turn_number, count: (.requests | length)}'
 
-# Find all subagent trace IDs
+# Find all subagent trace IDs (or use --role subagent)
 scribe q tree --latest --source claude-code \
   --jq '[.turns[].requests[] | recurse(.children[]?) | select(.execution_role=="subagent") | .trace_request_id]'
 

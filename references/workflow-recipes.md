@@ -45,17 +45,20 @@ scribe q show <codex_id> --fields messages --full \
 they accomplished.
 
 ```bash
-# 1. Get the tree
-scribe q tree --latest --source claude-code
+# 1. Get only subagent requests in the tree
+scribe q tree --latest --source claude-code --role subagent --table
 
 # 2. Count subagents by fine_role
-scribe q tree --latest --source claude-code \
+scribe q tree --latest --source claude-code --role subagent \
   --jq '[.turns[].requests[] | recurse(.children[]?) | select(.execution_role=="subagent") | .fine_role] | group_by(.) | map({role: .[0], count: length})'
 
-# 3. Find what the longest subagent chain did
+# 3. Inspect a specific subagent's tools and config
+scribe q show <subagent_id> --fields tools,config
+# Shows: tool_count, tool_definitions, and model/max_tokens/temperature
+
+# 4. Find what the longest subagent chain did
 scribe q tree --latest --source claude-code \
   --jq '.turns[].requests[] | select(.children | length > 3) | .trace_request_id'
-# Then inspect it:
 scribe q show <chain_root_id> --fields messages --full
 ```
 
@@ -123,6 +126,10 @@ scribe q tree --latest --source claude-code \
 # 2. When you spot the change, diff the config
 scribe q diff <id_after_switch> --fields config
 # Shows: {"model": {"from": "claude-sonnet-4-6", "to": "claude-opus-4-6"}}
+
+# 3. Or inspect any request's config directly
+scribe q show <id> --fields config
+# Shows: {"config": {"model": "claude-opus-4-6", "max_tokens": 64000, "thinking": {"type": "adaptive"}}}
 ```
 
 ## Extract all tool definitions from a session
@@ -153,6 +160,44 @@ scribe q tree --session <session2> --table
 
 # 3. Search for specific patterns across all Codex sessions
 scribe q search "apply_patch" --source codex --role assistant
+```
+
+## Deep-dive a subagent type
+
+**Goal**: Understand the full context a specific subagent type receives — its system
+prompt, available tools, injected context, and how it differs from the primary.
+
+```bash
+# 1. Find subagent requests by type
+scribe q tree --latest --source claude-code --fine-role task_subagent_explore --table
+# Or search by system prompt fingerprint:
+scribe q search "file search specialist" --role system --source claude-code --latest --limit 1
+
+# 2. Extract the subagent's full system prompt
+scribe q show <subagent_id> --fields messages --full \
+  --jq '.messages[] | select(.role=="system") | .content'
+
+# 3. Extract its tool list (use DB fallback if show --fields tools is empty)
+sqlite3 ~/.scribe/traces.db \
+  "SELECT body FROM raw_payloads WHERE trace_request_id = '<subagent_full_id>'" \
+  | python3 -c "import json,sys; [print(t['name']) for t in json.loads(sys.stdin.read()).get('tools',[])]"
+
+# 4. Compare tools: primary vs subagent
+diff <(sqlite3 ~/.scribe/traces.db \
+  "SELECT body FROM raw_payloads WHERE trace_request_id = '<primary_id>'" \
+  | python3 -c "import json,sys; [print(t['name']) for t in json.loads(sys.stdin.read()).get('tools',[])]" | sort) \
+  <(sqlite3 ~/.scribe/traces.db \
+  "SELECT body FROM raw_payloads WHERE trace_request_id = '<subagent_id>'" \
+  | python3 -c "import json,sys; [print(t['name']) for t in json.loads(sys.stdin.read()).get('tools',[])]" | sort)
+
+# 5. Check what system-reminder context the subagent receives
+scribe q show <subagent_id> --fields messages --full \
+  --jq '.messages[] | select(.role=="user") | .content' \
+  | grep -oP '<system-reminder>.*?</system-reminder>'
+
+# 6. Check the Agent tool call that spawned it (from primary's response)
+scribe q show <primary_id> --fields messages --full \
+  --jq '.messages[] | select(.content | test("Agent")) | {content, tool_call_json}'
 ```
 
 ## Best practices

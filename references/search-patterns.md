@@ -18,7 +18,14 @@ scribe q search "system-reminder"           # literal string
 scribe q search "CLAUDE\.md"                # escaped dot
 scribe q search "memory/[\w./-]+\.md"       # regex for memory file paths
 scribe q search "tool_(use|result)"         # alternation
+scribe q search 'explore|file search'       # regex OR (use single quotes!)
 ```
+
+**Shell quoting matters for regex OR (`|`).** The pipe character is a shell
+operator, so always wrap patterns containing `|` in **single quotes**:
+- `scribe q search 'foo|bar'` — correct
+- `scribe q search "foo|bar"` — correct
+- `scribe q search foo\|bar` — may fail depending on shell
 
 ## Filtering by role
 

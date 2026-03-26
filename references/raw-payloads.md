@@ -145,3 +145,51 @@ Check what the trace_request metadata says:
 scribe q show <id>
 # Look at "provider" and "direction" fields
 ```
+
+## Direct database fallback
+
+When `raw` or `show --fields tools` don't work as expected, query the SQLite
+database directly. This always works and gives you full access to stored data.
+
+```bash
+# Pretty-print raw request JSON (replaces: scribe q raw <id> --pretty)
+sqlite3 ~/.scribe/traces.db \
+  "SELECT body FROM raw_payloads WHERE trace_request_id = '<full_32char_id>'" \
+  | python3 -m json.tool
+
+# List tool names (replaces: scribe q show <id> --fields tools)
+sqlite3 ~/.scribe/traces.db \
+  "SELECT body FROM raw_payloads WHERE trace_request_id = '<id>'" \
+  | python3 -c "import json,sys; [print(t['name']) for t in json.loads(sys.stdin.read()).get('tools',[])]"
+
+# Get a specific tool definition by name
+sqlite3 ~/.scribe/traces.db \
+  "SELECT body FROM raw_payloads WHERE trace_request_id = '<id>'" \
+  | python3 -c "
+import json,sys
+data = json.loads(sys.stdin.read())
+for t in data.get('tools', []):
+    if t['name'] == 'Agent':
+        print(json.dumps(t, indent=2, ensure_ascii=False))
+"
+
+# Extract top-level API config (model, max_tokens, temperature, etc.)
+sqlite3 ~/.scribe/traces.db \
+  "SELECT body FROM raw_payloads WHERE trace_request_id = '<id>'" \
+  | python3 -c "
+import json,sys
+d = json.loads(sys.stdin.read())
+print(json.dumps({k: d[k] for k in ['model','max_tokens','temperature','top_p','top_k'] if k in d}, indent=2))
+"
+
+# Compare tool lists between two requests
+diff <(sqlite3 ~/.scribe/traces.db \
+  "SELECT body FROM raw_payloads WHERE trace_request_id = '<primary_id>'" \
+  | python3 -c "import json,sys; [print(t['name']) for t in json.loads(sys.stdin.read()).get('tools',[])]" | sort) \
+  <(sqlite3 ~/.scribe/traces.db \
+  "SELECT body FROM raw_payloads WHERE trace_request_id = '<subagent_id>'" \
+  | python3 -c "import json,sys; [print(t['name']) for t in json.loads(sys.stdin.read()).get('tools',[])]" | sort)
+```
+
+Note: `trace_request_id` in the database is the full 32-char ID. Use
+`scribe q search` or `scribe q tree --full` to get the full ID from a short prefix.

@@ -97,8 +97,9 @@ Stored in `summary.fine_role`, gives more detail than execution role.
 - `main_primary` — the main user-facing conversation
 
 ### Subagent
-- `task_subagent` — general-purpose subagent
-- `task_subagent_explore` — Explore agent (file search, codebase navigation)
+- `task_subagent` — general-purpose subagent (legacy name)
+- `task_subagent_general` — general-purpose subagent (current, uses all tools)
+- `task_subagent_explore` — Explore agent (file search, codebase navigation, READ-ONLY)
 - `task_subagent_plan` — Plan agent (architecture, implementation strategy)
 - `task_subagent_guide` — Guide agent (documentation lookup)
 - `task_subagent_statusline` — Statusline configuration agent
@@ -108,6 +109,7 @@ Stored in `summary.fine_role`, gives more detail than execution role.
 - `topic_assistive` — topic change detection ("is this a new conversation?")
 - `suggest_assistive` — next-action suggestions for the user
 - `filepath_assistive` — file path extraction from shell commands
+- `websearch_assistive` — web search helper (haiku, triggered by WebSearch tool)
 - `unknown_assistive` — unclassified helper (haiku + 0 tools)
 
 ### Probe

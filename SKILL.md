@@ -69,12 +69,13 @@ scribe q search "memory/" --context-chars 200 --full
 ### Inspection — read the content
 
 ```bash
-# Structured decoded view (messages + tools + usage)
+# Structured decoded view (messages + tools + usage + config)
 scribe q show <trace_request_id>
 scribe q show <id> --full                   # no truncation
 scribe q show <id> --fields messages        # only messages
-scribe q show <id> --fields tools           # tool definitions + calls
+scribe q show <id> --fields tools           # tool definitions + calls + count
 scribe q show <id> --fields usage           # token counts
+scribe q show <id> --fields config          # model, max_tokens, temperature, thinking
 
 # Raw payload (escape hatch)
 scribe q raw <trace_request_id>
@@ -91,6 +92,8 @@ scribe q tree --latest --source claude-code
 scribe q tree --latest --source claude-code --table    # human-readable
 scribe q tree --session 019d2463d141 --turn 3          # specific turn
 scribe q tree --latest --source codex
+scribe q tree --latest --role subagent                 # only subagent requests
+scribe q tree --latest --fine-role task_subagent_explore  # specific fine role
 
 # Incremental diff from previous same-role request
 scribe q diff <trace_request_id>
@@ -108,7 +111,7 @@ scribe q diff <id> --full                   # no truncation on diffs
 Every command supports `--jq` for client-side filtering:
 
 ```bash
-# Count subagent requests
+# Count subagent requests (or use --role subagent)
 scribe q tree --latest --source claude-code \
   --jq '[.turns[].requests[] | select(.execution_role=="subagent")] | length'
 
@@ -136,6 +139,8 @@ scribe q show <id> --fields tools \
 | `--table` | sessions, tree | Human-readable table output |
 | `--jq <expr>` | all 6 commands | Client-side jq filter |
 | `--fields <list>` | sessions, show, diff | Select output sections |
+| `--role <role>` | tree | Filter by execution_role (primary/subagent/assistive/probe) |
+| `--fine-role <role>` | tree | Filter by fine_role (e.g. task_subagent_explore) |
 | `--limit <n>` | sessions, search | Cap number of results |
 
 ID prefix matching: any 8+ character prefix of a session or trace_request ID
@@ -191,8 +196,8 @@ scribe q diff 019d24661c1f --fields system,memory
 
 ```bash
 # 1. Find the subagent in the tree
-scribe q tree --latest --source claude-code --table
-# Look for [subagent] nodes and note the trace_request_id
+scribe q tree --latest --source claude-code --role subagent --table
+# Shows only subagent nodes — note the trace_request_id
 
 # 2. See what the subagent was asked to do
 scribe q show 019d24663909 --fields messages --full
@@ -202,6 +207,31 @@ scribe q show 019d24663909
 # Note the paired_trace_request_id, then:
 scribe q raw <paired_id> --pretty
 ```
+
+## Known limitations and workarounds
+
+### `show --fields tools` may return empty
+
+Tool definitions are not always extracted by `show`. Use direct DB query:
+
+```bash
+sqlite3 ~/.scribe/traces.db \
+  "SELECT body FROM raw_payloads WHERE trace_request_id = '<full_32char_id>'" \
+  | python3 -c "import json,sys; [print(t['name']) for t in json.loads(sys.stdin.read()).get('tools',[])]"
+```
+
+### `raw` command may crash
+
+If `raw` errors out, query the database directly:
+
+```bash
+sqlite3 ~/.scribe/traces.db \
+  "SELECT body FROM raw_payloads WHERE trace_request_id = '<id>'" \
+  | python3 -m json.tool
+```
+
+See [references/raw-payloads.md](references/raw-payloads.md) § "Direct database
+fallback" for more patterns (tool extraction, config extraction, tool list diffs).
 
 ## Specific tasks
 
