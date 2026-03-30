@@ -53,6 +53,34 @@ scribe q search "error" --role tool
 | `assistant` | Model responses, tool use requests |
 | `tool` | Tool execution results |
 
+## Filtering by execution role
+
+Use `--execution-role` and `--fine-role` to narrow search to specific request
+types. This filters at the trace_request level (before message extraction),
+which is more efficient than post-filtering with `--jq`.
+
+```bash
+# Only search in subagent requests
+scribe q search "You are" --execution-role subagent --role system
+
+# Only search in explore agents
+scribe q search "file" --fine-role task_subagent_explore
+
+# Only search in primary conversation
+scribe q search "implement" --execution-role primary --role user
+```
+
+| Execution Role | What it is |
+|---------------|-----------|
+| `primary` | Main agent conversation |
+| `subagent` | Spawned sub-task (Explore, Plan, General) |
+| `assistive` | Lightweight helper (hooks, suggestions) |
+| `probe` | Token counting / capability checks |
+
+Search results include `execution_role` and `fine_role` (when available) in
+each match, so you can see the request context without needing to cross-check
+the tree.
+
 ## Filtering by direction
 
 ```bash
