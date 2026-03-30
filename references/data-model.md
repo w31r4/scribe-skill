@@ -25,6 +25,14 @@ one Cursor conversation.
 | `ended_at` | ISO timestamp | When it ended (null if active) |
 | `metadata` | dict | Provider-specific metadata |
 
+The `metadata` field may contain a `thread_key` (for Claude Code sessions) which
+is the CC session UUID. This appears in `tree` output and can be used to
+cross-reference with `.claude/projects/` local files:
+```bash
+scribe q tree --latest --jq '.thread_key'
+# → "be6d483f-cc2d-4dbe-8738-f2465e4ab432"
+```
+
 Sessions are created automatically when scribe detects a new conversation.
 A session ends when there's a 5-minute gap in activity or the agent exits.
 
