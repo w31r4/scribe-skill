@@ -200,6 +200,143 @@ scribe q show <primary_id> --fields messages --full \
   --jq '.messages[] | select(.content | test("Agent")) | {content, tool_call_json}'
 ```
 
+## Extract Agent tool call parameters from a response
+
+**Goal**: See exactly what `subagent_type`, `model`, `prompt` the primary passed
+when spawning subagents.
+
+```bash
+# 1. Find the primary request that spawned subagents
+scribe q tree --latest --source claude-code --table
+# Look for a primary with -> tool_use that has subagent children
+
+# 2. Find the paired response
+sqlite3 ~/.scribe/traces.db "
+  SELECT id, direction FROM trace_requests
+  WHERE request_id = (SELECT request_id FROM trace_requests WHERE id LIKE '<primary_id>%')
+  ORDER BY direction"
+# The 'response' row is what you need
+
+# 3. Parse Agent tool_use blocks from the SSE stream
+sqlite3 ~/.scribe/traces.db "SELECT body FROM raw_payloads WHERE trace_request_id = '<response_id>'" \
+  | python3 -c "
+import json, sys
+text = sys.stdin.read().strip()
+current_tool = None; current_json = ''
+for line in text.split('\n'):
+    line = line.strip()
+    if not line.startswith('data: '): continue
+    try:
+        d = json.loads(line[6:])
+        if d.get('type') == 'content_block_start':
+            cb = d.get('content_block', {})
+            if cb.get('type') == 'tool_use':
+                if current_tool and current_tool.get('name') == 'Agent':
+                    try: current_tool['input'] = json.loads(current_json)
+                    except: pass
+                    print(json.dumps(current_tool, indent=2, ensure_ascii=False))
+                    print('---')
+                current_tool = {'name': cb.get('name'), 'id': cb.get('id')}
+                current_json = ''
+        elif d.get('type') == 'content_block_delta':
+            delta = d.get('delta', {})
+            if delta.get('type') == 'input_json_delta':
+                current_json += delta.get('partial_json', '')
+    except: pass
+if current_tool and current_tool.get('name') == 'Agent':
+    try: current_tool['input'] = json.loads(current_json)
+    except: pass
+    print(json.dumps(current_tool, indent=2, ensure_ascii=False))
+"
+```
+
+Example output:
+```json
+{
+  "name": "Agent",
+  "id": "toolu_01XYZ...",
+  "input": {
+    "description": "Research rs/zerolog",
+    "model": "sonnet",
+    "prompt": "Research the Go logging library rs/zerolog. Find:\n1. Latest version..."
+  }
+}
+```
+
+## Cross-reference scribe traces with CC local files
+
+**Goal**: Correlate API-level trace data with Claude Code's local session
+persistence (subagent metadata, agentId, conversation history).
+
+```bash
+# 1. Find the CC session UUID (appears in system-reminder as sessionId or in the JSONL)
+#    CC uses UUIDs (a2839f01-...), scribe uses ULIDs (019d283ff76b...)
+ls ~/.claude/projects/-Users-*-<project_name>/
+
+# 2. List all subagents in a CC session
+for f in ~/.claude/projects/.../<session_uuid>/subagents/*.meta.json; do
+    echo "$(basename $f): $(cat $f)"
+done
+
+# 3. Map agentId to scribe trace data
+#    agentId format: 17-char hex (e.g., a326d912dc8360845)
+#    Search scribe for the subagent's system prompt fingerprint
+scribe q search "file search specialist" --source claude-code --latest --limit 1
+# The matching trace_request_id is the subagent's first API request
+
+# 4. Compare: subagent JSONL (CC local) vs scribe trace (API level)
+#    CC local has: hook progress events, isSidechain flag, agentId on every record
+#    Scribe has: raw API payloads, tool definitions, usage stats, request tree
+cat ~/.claude/projects/.../<session>/subagents/agent-<agentId>.jsonl | python3 -c "
+import json, sys
+for line in sys.stdin:
+    d = json.loads(line.strip())
+    print(f'{d.get(\"type\"):12} isSidechain={d.get(\"isSidechain\")} agentId={d.get(\"agentId\",\"?\")[:8]}')
+"
+
+# 5. Extract usage stats from parent JSONL (not available in scribe)
+grep -o 'agentId: a[a-f0-9]*.*</usage>' ~/.claude/projects/.../<session>.jsonl
+```
+
+## Analyze system-reminder injection patterns
+
+**Goal**: Understand what context CC injects into user messages and tool_result
+messages across conversation rounds.
+
+```bash
+# 1. Check how many system-reminders a request has
+scribe q show <id> --fields messages --full | python3 -c "
+import json, sys, re
+data = json.load(sys.stdin)
+for m in data.get('messages', []):
+    role = m.get('role','')
+    c = json.dumps(m.get('content',''))
+    reminders = re.findall(r'<system-reminder>(.*?)</system-reminder>', c, re.DOTALL)
+    if reminders:
+        print(f'[{role}] {len(reminders)} reminder(s)')
+        for i, r in enumerate(reminders):
+            print(f'  [{i}]: {r.strip()[:100]}...')
+"
+
+# 2. Track reminder injection across rounds (subagent multi-turn)
+#    Find all rounds of a subagent conversation
+sqlite3 ~/.scribe/traces.db "
+WITH RECURSIVE chain(id, depth) AS (
+    SELECT '<first_subagent_request_id>', 0
+    UNION ALL
+    SELECT tr.id, c.depth + 1
+    FROM trace_requests tr JOIN chain c ON tr.parent_request_id = c.id
+    WHERE tr.direction = 'request'
+)
+SELECT id, depth FROM chain ORDER BY depth"
+
+# 3. For each round, check what reminders appear in tool_result messages
+#    Key patterns:
+#    - Explore: READ-ONLY reminder in almost every tool_result
+#    - General: MCP instructions in first tool_result only
+#    - Primary: claudeMd + hooks + skills + MCP in initial user message
+```
+
 ## Best practices
 
 1. **Always start with `tree`** to orient yourself. It's the map of the session.
