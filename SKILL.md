@@ -17,6 +17,7 @@ allowed-tools:
   - Read
   - Grep
   - Glob
+  - Write
 ---
 
 # Scribe Query — Agent Behavior Analysis via CLI
@@ -64,6 +65,8 @@ scribe q search "system-reminder" --latest --source claude-code
 scribe q search "CLAUDE.md" --role system --direction request
 scribe q search "error" --role assistant --direction response --limit 5
 scribe q search "memory/" --context-chars 200 --full
+scribe q search "You are" --execution-role subagent --role system  # only subagent system prompts
+scribe q search "CLAUDE.md" --fine-role task_subagent_explore      # specific agent type
 ```
 
 ### Inspection — read the content
@@ -76,6 +79,7 @@ scribe q show <id> --fields messages        # only messages
 scribe q show <id> --fields tools           # tool definitions + calls + count
 scribe q show <id> --fields usage           # token counts
 scribe q show <id> --fields config          # model, max_tokens, temperature, thinking
+scribe q show <id> --fields reminders       # extracted <system-reminder> blocks
 
 # Raw payload (escape hatch)
 scribe q raw <trace_request_id>
@@ -138,9 +142,10 @@ scribe q show <id> --fields tools \
 | `--full` | sessions, search, show, diff | Disable content truncation |
 | `--table` | sessions, tree | Human-readable table output |
 | `--jq <expr>` | all 6 commands | Client-side jq filter |
-| `--fields <list>` | sessions, show, diff | Select output sections |
-| `--role <role>` | tree | Filter by execution_role (primary/subagent/assistive/probe) |
-| `--fine-role <role>` | tree | Filter by fine_role (e.g. task_subagent_explore) |
+| `--fields <list>` | sessions, show, diff | Select output sections (messages,tools,usage,config,reminders) |
+| `--role <role>` | search, tree | search: message role; tree: execution_role |
+| `--execution-role <role>` | search | Filter by execution_role (primary/subagent/assistive/probe) |
+| `--fine-role <role>` | search, tree | Filter by fine_role (e.g. task_subagent_explore) |
 | `--limit <n>` | sessions, search | Cap number of results |
 
 ID prefix matching: any 8+ character prefix of a session or trace_request ID
@@ -199,14 +204,101 @@ scribe q diff 019d24661c1f --fields system,memory
 scribe q tree --latest --source claude-code --role subagent --table
 # Shows only subagent nodes — note the trace_request_id
 
-# 2. See what the subagent was asked to do
-scribe q show 019d24663909 --fields messages --full
+# 2. See what the subagent was asked to do (messages + config)
+scribe q show 019d24663909 --fields messages,config --full
 
-# 3. See what it responded
+# 3. See what tools were available to it
+scribe q show 019d24663909 --fields tools
+
+# 4. See what it responded
 scribe q show 019d24663909
 # Note the paired_trace_request_id, then:
 scribe q raw <paired_id> --pretty
 ```
+
+## Working with response payloads (SSE streams)
+
+Response-direction payloads are **SSE (Server-Sent Events) streams**, not JSON.
+Each line is `data: {json}` with incremental deltas. `show` decodes these
+automatically, but `raw` and DB queries return the raw stream.
+
+To extract Agent tool call parameters from a primary's response SSE:
+
+```bash
+# 1. Find the response trace ID (paired with a primary request)
+sqlite3 ~/.scribe/traces.db "
+  SELECT id FROM trace_requests
+  WHERE request_id = (SELECT request_id FROM trace_requests WHERE id LIKE '<primary_request_id>%')
+  AND direction = 'response'"
+
+# 2. Parse Agent tool_use blocks from the SSE stream
+sqlite3 ~/.scribe/traces.db "SELECT body FROM raw_payloads WHERE trace_request_id = '<response_id>'" \
+  | python3 -c "
+import json, sys
+text = sys.stdin.read().strip()
+current_tool = None; current_json = ''
+for line in text.split('\n'):
+    line = line.strip()
+    if not line.startswith('data: '): continue
+    try:
+        d = json.loads(line[6:])
+        if d.get('type') == 'content_block_start':
+            cb = d.get('content_block', {})
+            if cb.get('type') == 'tool_use':
+                if current_tool and current_tool.get('name') == 'Agent':
+                    try: current_tool['input'] = json.loads(current_json)
+                    except: pass
+                    print(json.dumps(current_tool, indent=2, ensure_ascii=False))
+                    print('---')
+                current_tool = {'name': cb.get('name'), 'id': cb.get('id')}
+                current_json = ''
+        elif d.get('type') == 'content_block_delta':
+            delta = d.get('delta', {})
+            if delta.get('type') == 'input_json_delta':
+                current_json += delta.get('partial_json', '')
+    except: pass
+if current_tool and current_tool.get('name') == 'Agent':
+    try: current_tool['input'] = json.loads(current_json)
+    except: pass
+    print(json.dumps(current_tool, indent=2, ensure_ascii=False))
+"
+```
+
+## Cross-referencing with CC local files
+
+Claude Code persists subagent data on disk. These files complement scribe traces
+with information not visible at the API level (agentId, isSidechain flag, hook
+progress events, meta.json).
+
+```bash
+# Find CC session directories for the current project
+ls ~/.claude/projects/-Users-*-<project_name>/
+
+# List subagents for a session (CC uses UUID session IDs, not scribe ULIDs)
+ls ~/.claude/projects/-Users-*-<project>/*/subagents/*.meta.json
+
+# Read subagent metadata (agentType + description)
+cat ~/.claude/projects/.../subagents/agent-<agentId>.meta.json
+
+# Read subagent conversation history
+cat ~/.claude/projects/.../subagents/agent-<agentId>.jsonl | python3 -c "
+import json, sys
+for line in sys.stdin:
+    d = json.loads(line.strip())
+    t = d.get('type','?')
+    sc = d.get('isSidechain','')
+    print(f'{t:12} isSidechain={sc}')
+"
+
+# Extract agentId + usage from parent session JSONL
+grep -o 'agentId: a[a-f0-9]*.*</usage>' ~/.claude/projects/.../<session>.jsonl
+```
+
+Key files:
+- `<session>.jsonl` — parent conversation (isSidechain: false)
+- `subagents/agent-<agentId>.jsonl` — subagent conversation (isSidechain: true)
+- `subagents/agent-<agentId>.meta.json` — `{agentType, description}`
+- `tool-results/*.txt` — context compression snapshots (NOT subagent outputs)
 
 ## Known limitations and workarounds
 
